@@ -1,0 +1,1 @@
+# trustpilot-analyzer-v2
