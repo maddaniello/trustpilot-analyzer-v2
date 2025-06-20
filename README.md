@@ -49,4 +49,4 @@ streamlit run app.py
 ```
 
 ---
-Sviluppato con ❤️ per il Digital Marketing
+Sviluppato in qualche modo da Daniele Pisciottano 🦕
