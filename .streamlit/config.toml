@@ -1,12 +1,9 @@
 [theme]
-# Colori principali
-primaryColor = "#E52217"
-backgroundColor = "#FFFFFF" 
+primaryColor = "#4ECDC4"
+backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F0F2F6"
 textColor = "#262730"
-
-# Font
-font = "sans serif"  # "sans serif", "serif", "monospace"
+font = "sans serif"  # ← Solo queste 3 opzioni
 
 [server]
 # Limiti upload
