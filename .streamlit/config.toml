@@ -1,0 +1,14 @@
+[theme]
+# Colori principali
+primaryColor = "#E52217"
+backgroundColor = "#FFFFFF" 
+secondaryBackgroundColor = "#8A8A8A"
+textColor = "#262730"
+
+# Font
+font = "sans serif"  # "sans serif", "serif", "monospace"
+
+[server]
+# Limiti upload
+maxUploadSize = 200
+maxMessageSize = 200
