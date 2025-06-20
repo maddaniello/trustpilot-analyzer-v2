@@ -1,11 +1,1 @@
-[theme]
-primaryColor = "#4ECDC4"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F0F2F6"
-textColor = "#262730"
-font = "sans serif"  # ← Solo queste 3 opzioni
 
-[server]
-# Limiti upload
-maxUploadSize = 200
-maxMessageSize = 200
