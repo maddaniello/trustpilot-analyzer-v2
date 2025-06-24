@@ -523,5 +523,13 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
+ # Footer
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align: center; color: #666;'>
+        <p>Trustpilot Analyzer PRO - Crea strategie partendo dalle analisi di TrustPilot - Sviluppato da Daniele Pisciottano e il suo amico Claude 🦕</p>
+    </div>
+    """, unsafe_allow_html=True)
+
 if __name__ == "__main__":
     main()
