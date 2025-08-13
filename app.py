@@ -167,66 +167,104 @@ def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_te
 
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Trova tutti i contenitori di recensioni
-            recensioni_contenitori = soup.find_all('div', class_=re.compile(r'styles_reviewCardInner|review-card|paper.*cardPadding'))
+            # Approccio multi-selettore per maggiore compatibilità
+            recensioni_elementi = []
             
-            if not recensioni_contenitori:
-                recensioni_contenitori = soup.find_all('article')
+            # Prova diversi selettori
+            selettori = [
+                'article[data-service-review-business-unit-id]',
+                'div[class*="review-card"]',
+                'div[class*="styles_reviewCard"]',
+                'div[class*="paper_paper"]',
+                'section[class*="reviewContentwrapper"]',
+                'article.review',
+                'div.review-content'
+            ]
             
-            for contenitore in recensioni_contenitori:
+            for selettore in selettori:
+                elementi = soup.select(selettore)
+                if elementi:
+                    recensioni_elementi.extend(elementi)
+                    break
+            
+            # Se ancora vuoto, cerca in modo più generico
+            if not recensioni_elementi:
+                recensioni_elementi = soup.find_all(['article', 'div'], class_=re.compile(r'review|card'))
+            
+            for elemento in recensioni_elementi:
                 try:
+                    # Estrai testo
+                    testo_completo = elemento.get_text(separator=" ", strip=True)
+                    
                     # Estrai rating con metodi multipli
                     rating = 0
                     
-                    # Metodo 1: Cerca stelle piene nelle immagini
-                    star_images = contenitore.find_all('img', alt=re.compile(r'Rated \d'))
-                    if star_images:
-                        for img in star_images:
-                            alt_text = img.get('alt', '')
-                            match = re.search(r'Rated (\d)', alt_text)
+                    # Metodo 1: Cerca attributi data
+                    for attr in ['data-star-rating', 'data-rating', 'data-stars']:
+                        if elemento.get(attr):
+                            try:
+                                rating = int(elemento.get(attr))
+                                break
+                            except:
+                                pass
+                    
+                    # Metodo 2: Cerca nelle immagini stelle
+                    if not rating:
+                        star_imgs = elemento.find_all('img', alt=re.compile(r'\d\s*(star|stelle|su\s*5)', re.I))
+                        if star_imgs:
+                            for img in star_imgs:
+                                match = re.search(r'(\d)', img.get('alt', ''))
+                                if match:
+                                    rating = int(match.group(1))
+                                    break
+                    
+                    # Metodo 3: Conta elementi stella
+                    if not rating:
+                        # Cerca svg o span con classe star
+                        stars = elemento.find_all(['svg', 'span', 'i'], class_=re.compile(r'star.*?(full|filled|active)|icon.*?star.*?full'))
+                        if stars:
+                            rating = len(stars)
+                    
+                    # Metodo 4: Estrai dal testo
+                    if not rating:
+                        rating_patterns = [
+                            r'(\d)\s*stelle\s*su\s*5',
+                            r'(\d)\s*su\s*5\s*stelle',
+                            r'Valutazione:\s*(\d)',
+                            r'Rating:\s*(\d)',
+                            r'(\d)\s*star[s]?\s*out\s*of\s*5'
+                        ]
+                        for pattern in rating_patterns:
+                            match = re.search(pattern, testo_completo, re.I)
                             if match:
                                 rating = int(match.group(1))
                                 break
                     
-                    # Metodo 2: Cerca attributi data-star-rating
-                    if not rating:
-                        rating_elem = contenitore.find(attrs={'data-star-rating': True})
-                        if rating_elem:
-                            rating = int(rating_elem['data-star-rating'])
+                    # Pulisci il testo principale della recensione
+                    # Cerca il contenuto specifico della recensione
+                    contenuto_recensione = None
                     
-                    # Metodo 3: Conta le stelle SVG piene
-                    if not rating:
-                        # Cerca SVG stelle piene (di solito hanno path o fill specifici)
-                        stelle_piene = contenitore.find_all('svg', class_=re.compile(r'star.*filled|star.*active'))
-                        if stelle_piene:
-                            rating = len(stelle_piene)
+                    # Cerca in elementi specifici
+                    for classe in ['reviewContent', 'review-content', 'review-text', 'typography_body']:
+                        elem = elemento.find(class_=re.compile(classe, re.I))
+                        if elem:
+                            contenuto_recensione = elem.get_text(strip=True)
+                            break
                     
-                    # Metodo 4: Cerca nel testo strutturato
-                    if not rating:
-                        rating_text = contenitore.find(class_=re.compile(r'star-rating|rating-stars|styles_reviewHeader'))
-                        if rating_text:
-                            text = rating_text.get_text()
-                            match = re.search(r'(\d)\s*su\s*5|(\d)\s*star|(\d)\s*stelle', text)
-                            if match:
-                                rating = int(match.group(1) or match.group(2) or match.group(3))
+                    # Se non trovato, cerca in p o div
+                    if not contenuto_recensione:
+                        p_elem = elemento.find('p')
+                        if p_elem:
+                            contenuto_recensione = p_elem.get_text(strip=True)
+                        else:
+                            contenuto_recensione = testo_completo
                     
-                    # Estrai testo della recensione
-                    # Cerca specificamente il contenuto della recensione
-                    testo_elem = contenitore.find(class_=re.compile(r'reviewContent|typography.*body|styles_reviewContent'))
-                    if not testo_elem:
-                        testo_elem = contenitore.find('p')
-                    
-                    if testo_elem:
-                        testo = testo_elem.get_text(strip=True)
-                    else:
-                        testo = contenitore.get_text(separator=" ", strip=True)
-                    
-                    # Pulisci il testo da elementi non necessari
-                    testo = re.sub(r'Verificata|Data dell.*esperienza.*\d{4}', '', testo).strip()
+                    # Pulisci il testo
+                    testo = re.sub(r'Verificata|Data dell.*esperienza.*\d{4}|Pubblicata.*\d{4}', '', contenuto_recensione).strip()
                     
                     # Costruisci URL
                     review_url = url_pagina
-                    link_elem = contenitore.find('a', href=re.compile(r'/reviews/'))
+                    link_elem = elemento.find('a', href=re.compile(r'/review'))
                     if link_elem:
                         href = link_elem['href']
                         if href.startswith('/'):
@@ -234,7 +272,21 @@ def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_te
                         else:
                             review_url = href
                     
-                    if testo and len(testo) > 30 and rating > 0:
+                    # Validazione base
+                    if testo and len(testo) > 20:
+                        # Se non abbiamo trovato il rating, assegnane uno di default
+                        if rating == 0:
+                            # Prova a dedurlo dal sentiment del testo
+                            testo_lower = testo.lower()
+                            if any(word in testo_lower for word in ['ottimo', 'eccellente', 'perfetto', 'consiglio']):
+                                rating = 5
+                            elif any(word in testo_lower for word in ['buono', 'bene', 'soddisfatto']):
+                                rating = 4
+                            elif any(word in testo_lower for word in ['pessimo', 'terribile', 'sconsiglio']):
+                                rating = 1
+                            else:
+                                rating = 3  # Default neutro
+                        
                         tutte_recensioni.append({
                             'testo': testo,
                             'testo_pulito': pulisci_testo(testo),
@@ -245,6 +297,10 @@ def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_te
                         
                 except Exception as e:
                     continue
+            
+            # Se non abbiamo trovato recensioni e siamo alla prima pagina, mostra errore
+            if not tutte_recensioni and pagina == 1:
+                st.error(f"Debug: Nessuna recensione trovata nella pagina. HTML snippet: {str(soup.find('body'))[:200]}")
             
             progress_bar.progress(pagina / max_pagine)
             time.sleep(1)
