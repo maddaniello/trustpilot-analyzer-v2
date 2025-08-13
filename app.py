@@ -1,5 +1,5 @@
 # 🚀 ANALIZZATORE TRUSTPILOT - STREAMLIT APP
-# Versione Web User-Friendly
+# Versione Web User-Friendly con Clustering e Analisi Frequenze
 
 import streamlit as st
 import pandas as pd
@@ -9,15 +9,19 @@ import json
 import time
 import requests
 from bs4 import BeautifulSoup
-from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 from difflib import get_close_matches
 import warnings
 import io
+from collections import Counter
+import numpy as np
 warnings.filterwarnings('ignore')
 
 # 🎨 CONFIGURAZIONE PAGINA
 st.set_page_config(
-    page_title="🚀 Analizzatore Trustpilot",
+    page_title="🚀 Analizzatore Trustpilot Pro",
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -71,6 +75,33 @@ st.markdown("""
         text-align: center;
         margin: 1rem 0;
     }
+    
+    .cluster-box {
+        background: #f8f9fa;
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 4px solid #007bff;
+        margin: 0.5rem 0;
+    }
+    
+    .review-example {
+        background: #e9ecef;
+        padding: 0.8rem;
+        border-radius: 8px;
+        margin: 0.5rem 0;
+        font-style: italic;
+    }
+    
+    .frequency-badge {
+        background: #28a745;
+        color: white;
+        padding: 0.3rem 0.8rem;
+        border-radius: 20px;
+        font-size: 0.9rem;
+        font-weight: bold;
+        display: inline-block;
+        margin-right: 0.5rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -81,13 +112,14 @@ st.markdown("""
 <div class="feature-box">
     <h3>🎯 Cosa fa questa App?</h3>
     <p>• Estrae automaticamente recensioni da Trustpilot</p>
-    <p>• Analizza sentiment e identifica punti di forza/debolezza</p>
+    <p>• Clusterizza le recensioni per tematiche</p>
+    <p>• Calcola la frequenza di ogni punto di forza/debolezza</p>
+    <p>• Mostra esempi di recensioni per ogni tema</p>
     <p>• Genera strategie di Digital Marketing personalizzate</p>
-    <p>• Fornisce suggerimenti specifici per SEO, ADV, Email e CRO</p>
 </div>
 """, unsafe_allow_html=True)
 
-# 🔧 FUNZIONI BACKEND (nascoste nell'interfaccia)
+# 🔧 FUNZIONI BACKEND
 @st.cache_data
 def get_stopwords():
     return set([
@@ -117,11 +149,11 @@ def pulisci_testo(testo):
     parole_filtrate = [parola for parola in parole if parola not in stopwords_italiane and len(parola) > 2]
     return " ".join(parole_filtrate)
 
-def estrai_recensioni(url_base, max_pagine, progress_bar, status_text):
-    """Estrae recensioni con barra di progresso"""
+def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_text):
+    """Estrae recensioni con metadata (URL specifico)"""
     tutte_recensioni = []
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
 
     for pagina in range(1, max_pagine + 1):
@@ -135,26 +167,42 @@ def estrai_recensioni(url_base, max_pagine, progress_bar, status_text):
 
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            selettori = [
-                'section[class*="reviewContentwrapper"]',
-                'div[class*="review-content"]',
-                'article[class*="review"]'
-            ]
+            # Trova tutte le recensioni
+            recensioni_elementi = soup.find_all('article', {'data-service-review-business-unit-id': True})
             
-            sezioni = []
-            for selettore in selettori:
-                sezioni.extend(soup.select(selettore))
+            if not recensioni_elementi:
+                # Fallback su altri selettori
+                recensioni_elementi = soup.select('section[class*="reviewContentwrapper"]')
             
-            if not sezioni:
-                if pagina == 1:
-                    st.error("❌ Nessuna recensione trovata. Verifica l'URL.")
-                    return []
-                continue
-
-            for sezione in sezioni:
-                testo = sezione.get_text(separator=" ", strip=True)
-                if testo and len(testo) > 50:
-                    tutte_recensioni.append(testo)
+            for elemento in recensioni_elementi:
+                try:
+                    # Estrai testo
+                    testo = elemento.get_text(separator=" ", strip=True)
+                    
+                    # Prova a costruire URL diretto (pattern comune Trustpilot)
+                    review_id = elemento.get('id', '')
+                    if not review_id:
+                        # Cerca ID in altri attributi
+                        link_elem = elemento.find('a', href=True)
+                        if link_elem and 'reviews' in link_elem['href']:
+                            review_id = link_elem['href'].split('/')[-1]
+                    
+                    # Costruisci URL della recensione
+                    if review_id:
+                        review_url = f"{url_base}/reviews/{review_id}"
+                    else:
+                        review_url = url_pagina  # Fallback alla pagina
+                    
+                    if testo and len(testo) > 50:
+                        tutte_recensioni.append({
+                            'testo': testo,
+                            'testo_pulito': pulisci_testo(testo),
+                            'url': review_url,
+                            'pagina': pagina
+                        })
+                        
+                except Exception as e:
+                    continue
             
             progress_bar.progress(pagina / max_pagine)
             time.sleep(1)
@@ -164,6 +212,112 @@ def estrai_recensioni(url_base, max_pagine, progress_bar, status_text):
             continue
 
     return tutte_recensioni
+
+def clusterizza_recensioni(recensioni_data, n_clusters=5):
+    """Clusterizza le recensioni per tematiche"""
+    if len(recensioni_data) < n_clusters:
+        n_clusters = max(2, len(recensioni_data) // 2)
+    
+    # Estrai solo i testi puliti
+    testi = [r['testo_pulito'] for r in recensioni_data]
+    
+    # Vettorizzazione TF-IDF
+    vectorizer = TfidfVectorizer(max_features=100, ngram_range=(1, 2))
+    X = vectorizer.fit_transform(testi)
+    
+    # Clustering
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    clusters = kmeans.fit_predict(X)
+    
+    # Aggiungi cluster ai dati
+    for i, rec in enumerate(recensioni_data):
+        rec['cluster'] = clusters[i]
+    
+    # Trova termini chiave per ogni cluster
+    feature_names = vectorizer.get_feature_names_out()
+    cluster_keywords = {}
+    
+    for i in range(n_clusters):
+        # Trova il centroide del cluster
+        cluster_center = kmeans.cluster_centers_[i]
+        # Trova le parole più importanti
+        top_indices = cluster_center.argsort()[-10:][::-1]
+        top_keywords = [feature_names[idx] for idx in top_indices]
+        cluster_keywords[i] = top_keywords[:5]  # Top 5 keywords
+    
+    return recensioni_data, cluster_keywords
+
+def analizza_frequenze_temi(risultati, recensioni_data):
+    """Calcola le frequenze dei temi e trova esempi"""
+    analisi_frequenze = {
+        'punti_forza': {},
+        'punti_debolezza': {}
+    }
+    
+    # Analizza punti di forza
+    for punto in risultati['punti_forza']:
+        count = 0
+        esempi = []
+        
+        # Cerca menzioni nelle recensioni
+        for rec in recensioni_data:
+            testo_lower = rec['testo'].lower()
+            # Cerca parole chiave del punto
+            parole_punto = punto.lower().split()
+            if any(parola in testo_lower for parola in parole_punto if len(parola) > 3):
+                count += 1
+                if len(esempi) < 2:  # Massimo 2 esempi
+                    esempi.append({
+                        'testo': rec['testo'][:200] + '...' if len(rec['testo']) > 200 else rec['testo'],
+                        'url': rec['url']
+                    })
+        
+        if count > 0:
+            percentuale = (count / len(recensioni_data)) * 100
+            analisi_frequenze['punti_forza'][punto] = {
+                'count': count,
+                'percentuale': percentuale,
+                'esempi': esempi
+            }
+    
+    # Analizza punti di debolezza
+    for punto in risultati['punti_debolezza']:
+        count = 0
+        esempi = []
+        
+        for rec in recensioni_data:
+            testo_lower = rec['testo'].lower()
+            parole_punto = punto.lower().split()
+            if any(parola in testo_lower for parola in parole_punto if len(parola) > 3):
+                count += 1
+                if len(esempi) < 2:
+                    esempi.append({
+                        'testo': rec['testo'][:200] + '...' if len(rec['testo']) > 200 else rec['testo'],
+                        'url': rec['url']
+                    })
+        
+        if count > 0:
+            percentuale = (count / len(recensioni_data)) * 100
+            analisi_frequenze['punti_debolezza'][punto] = {
+                'count': count,
+                'percentuale': percentuale,
+                'esempi': esempi
+            }
+    
+    # Ordina per frequenza
+    analisi_frequenze['punti_forza'] = dict(sorted(
+        analisi_frequenze['punti_forza'].items(), 
+        key=lambda x: x[1]['percentuale'], 
+        reverse=True
+    ))
+    
+    analisi_frequenze['punti_debolezza'] = dict(sorted(
+        analisi_frequenze['punti_debolezza'].items(), 
+        key=lambda x: x[1]['percentuale'], 
+        reverse=True
+    ))
+    
+    return analisi_frequenze
 
 def deduplica_avanzata(lista, soglia=0.8):
     """Deduplica concetti simili"""
@@ -271,25 +425,52 @@ def analizza_blocchi_avanzata(blocchi, client, progress_bar, status_text):
     
     return risultati
 
-def crea_excel_download(recensioni_raw, recensioni_pulite, risultati):
-    """Crea file Excel per download"""
+def crea_excel_download_avanzato(recensioni_data, risultati, analisi_frequenze, cluster_keywords):
+    """Crea file Excel avanzato per download"""
     output = io.BytesIO()
     
+    # DataFrame recensioni con cluster
     df_recensioni = pd.DataFrame({
-        "Recensioni Originali": recensioni_raw,
-        "Recensioni Pulite": recensioni_pulite
+        "Recensioni Originali": [r['testo'] for r in recensioni_data],
+        "Recensioni Pulite": [r['testo_pulito'] for r in recensioni_data],
+        "Cluster": [r['cluster'] for r in recensioni_data],
+        "URL": [r['url'] for r in recensioni_data]
     })
     
-    df_analisi = pd.DataFrame({
-        "Categoria": ["Punti di Forza", "Punti di Debolezza", "Leve Marketing", "Parole Chiave"],
-        "Insights": [
-            " | ".join(risultati["punti_forza"][:10]),
-            " | ".join(risultati["punti_debolezza"][:10]),
-            " | ".join(risultati["leve_marketing"][:10]),
-            " | ".join(risultati["parole_chiave"][:20])
-        ]
-    })
+    # DataFrame analisi con frequenze
+    punti_forza_data = []
+    for punto, dati in analisi_frequenze['punti_forza'].items():
+        punti_forza_data.append({
+            'Punto di Forza': punto,
+            'Frequenza %': f"{dati['percentuale']:.1f}%",
+            'Occorrenze': dati['count'],
+            'Esempio 1': dati['esempi'][0]['testo'] if dati['esempi'] else '',
+            'URL Esempio 1': dati['esempi'][0]['url'] if dati['esempi'] else ''
+        })
+    df_punti_forza = pd.DataFrame(punti_forza_data)
     
+    punti_debolezza_data = []
+    for punto, dati in analisi_frequenze['punti_debolezza'].items():
+        punti_debolezza_data.append({
+            'Punto di Debolezza': punto,
+            'Frequenza %': f"{dati['percentuale']:.1f}%",
+            'Occorrenze': dati['count'],
+            'Esempio 1': dati['esempi'][0]['testo'] if dati['esempi'] else '',
+            'URL Esempio 1': dati['esempi'][0]['url'] if dati['esempi'] else ''
+        })
+    df_punti_debolezza = pd.DataFrame(punti_debolezza_data)
+    
+    # DataFrame cluster
+    cluster_data = []
+    for cluster_id, keywords in cluster_keywords.items():
+        cluster_data.append({
+            'Cluster': f"Tema {cluster_id + 1}",
+            'Parole Chiave': ' | '.join(keywords),
+            'Num. Recensioni': sum(1 for r in recensioni_data if r['cluster'] == cluster_id)
+        })
+    df_clusters = pd.DataFrame(cluster_data)
+    
+    # DataFrame strategie digital
     df_digital = pd.DataFrame({
         "Canale": ["SEO", "ADV", "Email Marketing", "CRO", "Sinergie"],
         "Suggerimenti Specifici": [
@@ -303,7 +484,9 @@ def crea_excel_download(recensioni_raw, recensioni_pulite, risultati):
     
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_recensioni.to_excel(writer, sheet_name="Recensioni", index=False)
-        df_analisi.to_excel(writer, sheet_name="Analisi Generale", index=False)
+        df_clusters.to_excel(writer, sheet_name="Cluster Tematici", index=False)
+        df_punti_forza.to_excel(writer, sheet_name="Punti Forza Frequenze", index=False)
+        df_punti_debolezza.to_excel(writer, sheet_name="Punti Debolezza Frequenze", index=False)
         df_digital.to_excel(writer, sheet_name="Strategia Digital", index=False)
     
     return output.getvalue()
@@ -337,9 +520,18 @@ def main():
             help="Più pagine = più recensioni ma più tempo"
         )
         
+        # Numero cluster
+        n_clusters = st.slider(
+            "🎯 Numero di temi (cluster)",
+            min_value=3,
+            max_value=10,
+            value=5,
+            help="Numero di tematiche principali da identificare"
+        )
+        
         st.markdown("---")
         st.markdown("### 💡 Suggerimenti")
-        st.info("• Inizia con 5-10 pagine per test rapidi\n• Usa 20+ pagine per analisi complete\n• Ogni pagina ha ~20 recensioni")
+        st.info("• Inizia con 5-10 pagine per test rapidi\n• Usa 20+ pagine per analisi complete\n• 5-7 cluster sono ideali per la maggior parte dei casi")
 
     # AREA PRINCIPALE
     col1, col2 = st.columns([2, 1])
@@ -378,23 +570,35 @@ def main():
                 status_text_1 = st.empty()
                 
                 with st.spinner("Estrazione in corso..."):
-                    recensioni_raw = estrai_recensioni(url_base, max_pagine, progress_bar_1, status_text_1)
+                    recensioni_data = estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar_1, status_text_1)
                 
-                if not recensioni_raw:
+                if not recensioni_data:
                     st.error("❌ Nessuna recensione estratta. Verifica l'URL.")
                     return
                 
-                st.success(f"✅ Estratte {len(recensioni_raw)} recensioni!")
+                st.success(f"✅ Estratte {len(recensioni_data)} recensioni!")
                 
-                # FASE 2: Pulizia
-                st.markdown("### 🧹 Fase 2: Pulizia Dati")
-                with st.spinner("Pulizia testi in corso..."):
-                    recensioni_pulite = [pulisci_testo(r) for r in recensioni_raw]
-                st.success("✅ Pulizia completata!")
+                # FASE 2: Clustering
+                st.markdown("### 🎯 Fase 2: Clustering Tematico")
+                with st.spinner("Clustering in corso..."):
+                    recensioni_data, cluster_keywords = clusterizza_recensioni(recensioni_data, n_clusters)
+                st.success(f"✅ Identificati {n_clusters} temi principali!")
                 
-                # FASE 3: Preparazione
+                # Mostra cluster
+                with st.expander("📊 Visualizza Temi Identificati"):
+                    for cluster_id, keywords in cluster_keywords.items():
+                        count = sum(1 for r in recensioni_data if r['cluster'] == cluster_id)
+                        st.markdown(f"""
+                        <div class="cluster-box">
+                            <h4>Tema {cluster_id + 1} ({count} recensioni)</h4>
+                            <p><strong>Parole chiave:</strong> {', '.join(keywords)}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                
+                # FASE 3: Preparazione per AI
                 st.markdown("### 📝 Fase 3: Preparazione per AI")
-                testo_completo = " ".join(recensioni_pulite)
+                testi_puliti = [r['testo_pulito'] for r in recensioni_data]
+                testo_completo = " ".join(testi_puliti)
                 parole = testo_completo.split()
                 blocchi = [' '.join(parole[i:i+8000]) for i in range(0, len(parole), 8000)]
                 st.info(f"📊 Creati {len(blocchi)} blocchi per l'analisi AI")
@@ -407,6 +611,11 @@ def main():
                 with st.spinner("Analisi AI in corso..."):
                     risultati = analizza_blocchi_avanzata(blocchi, client, progress_bar_2, status_text_2)
                 
+                # FASE 5: Analisi Frequenze
+                st.markdown("### 📈 Fase 5: Analisi Frequenze e Esempi")
+                with st.spinner("Calcolo frequenze..."):
+                    analisi_frequenze = analizza_frequenze_temi(risultati, recensioni_data)
+                
                 st.markdown('<div class="success-box"><h3>🎉 Analisi Completata!</h3></div>', unsafe_allow_html=True)
                 
                 # RISULTATI
@@ -416,7 +625,7 @@ def main():
                 col_m1, col_m2, col_m3, col_m4 = st.columns(4)
                 
                 with col_m1:
-                    st.metric("📝 Recensioni", len(recensioni_raw))
+                    st.metric("📝 Recensioni", len(recensioni_data))
                 
                 with col_m2:
                     st.metric("💪 Punti Forza", len(risultati['punti_forza']))
@@ -425,20 +634,57 @@ def main():
                     st.metric("⚠️ Criticità", len(risultati['punti_debolezza']))
                 
                 with col_m4:
-                    st.metric("🎯 Leve Marketing", len(risultati['leve_marketing']))
+                    st.metric("🎯 Temi", n_clusters)
                 
                 # Tabs per risultati
-                tab1, tab2, tab3, tab4, tab5 = st.tabs(["💪 Punti Forza", "⚠️ Criticità", "🎯 Leve Marketing", "📈 Strategie Digital", "🔍 Parole Chiave"])
+                tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+                    "💪 Punti Forza", 
+                    "⚠️ Criticità", 
+                    "🎯 Leve Marketing", 
+                    "📈 Strategie Digital", 
+                    "🔍 Parole Chiave",
+                    "📊 Cluster Tematici"
+                ])
                 
                 with tab1:
-                    st.markdown("### 💪 Punti di Forza Identificati")
-                    for i, punto in enumerate(risultati['punti_forza'][:10], 1):
-                        st.markdown(f"**{i}.** {punto}")
+                    st.markdown("### 💪 Punti di Forza con Frequenze")
+                    
+                    for punto, dati in list(analisi_frequenze['punti_forza'].items())[:10]:
+                        col_forza1, col_forza2 = st.columns([3, 1])
+                        
+                        with col_forza1:
+                            st.markdown(f"**{punto}**")
+                        
+                        with col_forza2:
+                            st.markdown(f'<span class="frequency-badge">{dati["percentuale"]:.1f}% ({dati["count"]} menzioni)</span>', unsafe_allow_html=True)
+                        
+                        # Mostra esempi
+                        if dati['esempi']:
+                            with st.expander("📋 Vedi esempi"):
+                                for esempio in dati['esempi']:
+                                    st.markdown(f'<div class="review-example">"{esempio["testo"]}"</div>', unsafe_allow_html=True)
+                                    if esempio['url'] != url_base:
+                                        st.markdown(f"[🔗 Vai alla recensione]({esempio['url']})")
                 
                 with tab2:
-                    st.markdown("### ⚠️ Punti di Debolezza")
-                    for i, punto in enumerate(risultati['punti_debolezza'][:10], 1):
-                        st.markdown(f"**{i}.** {punto}")
+                    st.markdown("### ⚠️ Punti di Debolezza con Frequenze")
+                    
+                    for punto, dati in list(analisi_frequenze['punti_debolezza'].items())[:10]:
+                        col_deb1, col_deb2 = st.columns([3, 1])
+                        
+                        with col_deb1:
+                            st.markdown(f"**{punto}**")
+                        
+                        with col_deb2:
+                            st.markdown(f'<span class="frequency-badge" style="background: #dc3545;">{dati["percentuale"]:.1f}% ({dati["count"]} menzioni)</span>', unsafe_allow_html=True)
+                        
+                        # Mostra esempi
+                        if dati['esempi']:
+                            with st.expander("📋 Vedi esempi"):
+                                for esempio in dati['esempi']:
+                                    st.markdown(f'<div class="review-example">"{esempio["testo"]}"</div>', unsafe_allow_html=True)
+                                    if esempio['url'] != url_base:
+                                        st.markdown(f"[🔗 Vai alla recensione]({esempio['url']})")
                 
                 with tab3:
                     st.markdown("### 🎯 Leve Marketing")
@@ -477,15 +723,37 @@ def main():
                         with parole_cols[i % 3]:
                             st.markdown(f"🔸 **{parola}**")
                 
+                with tab6:
+                    st.markdown("### 📊 Analisi dei Cluster Tematici")
+                    
+                    for cluster_id, keywords in cluster_keywords.items():
+                        recensioni_cluster = [r for r in recensioni_data if r['cluster'] == cluster_id]
+                        
+                        st.markdown(f"""
+                        <div class="cluster-box">
+                            <h4>📌 Tema {cluster_id + 1}</h4>
+                            <p><strong>Parole chiave:</strong> {', '.join(keywords)}</p>
+                            <p><strong>Recensioni:</strong> {len(recensioni_cluster)} ({(len(recensioni_cluster)/len(recensioni_data)*100):.1f}%)</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # Mostra esempio recensione per cluster
+                        if recensioni_cluster:
+                            with st.expander(f"Esempio recensione Tema {cluster_id + 1}"):
+                                esempio = recensioni_cluster[0]
+                                st.markdown(f'<div class="review-example">"{esempio["testo"][:300]}..."</div>', unsafe_allow_html=True)
+                                if esempio['url'] != url_base:
+                                    st.markdown(f"[🔗 Vai alla recensione]({esempio['url']})")
+                
                 # DOWNLOAD
                 st.markdown("## 📥 Download Report")
                 
-                excel_data = crea_excel_download(recensioni_raw, recensioni_pulite, risultati)
+                excel_data = crea_excel_download_avanzato(recensioni_data, risultati, analisi_frequenze, cluster_keywords)
                 
                 st.download_button(
                     label="📊 Scarica Report Excel Completo",
                     data=excel_data,
-                    file_name="Analisi_Trustpilot_Report.xlsx",
+                    file_name="Analisi_Trustpilot_Report_Avanzato.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     type="primary"
                 )
@@ -498,36 +766,36 @@ def main():
         1. **Inserisci API Key** OpenAI nella sidebar
         2. **Copia URL** della pagina Trustpilot
         3. **Scegli numero** di pagine da analizzare
-        4. **Clicca** "Avvia Analisi"
-        5. **Scarica** il report Excel
+        4. **Seleziona numero** di temi da identificare
+        5. **Clicca** "Avvia Analisi"
+        6. **Scarica** il report Excel
         
-        ### 🔑 Dove trovare API Key:
-        1. Vai su [OpenAI](https://platform.openai.com)
-        2. Accedi al tuo account
-        3. Vai in "API Keys"
-        4. Crea una nuova chiave
+        ### 🆕 Nuove Funzionalità:
+        • **Clustering tematico** delle recensioni
+        • **Frequenze** per ogni punto forte/debole
+        • **Esempi concreti** di recensioni
+        • **Link diretti** alle recensioni originali
+        • **Analisi quantitativa** dei temi
         
         ### 📈 Cosa Ottieni:
-        • **Punti di forza** della tua azienda
-        • **Criticità** da migliorare
-        • **Strategie SEO** personalizzate
-        • **Campagne ADV** suggerite
-        • **Email Marketing** ottimizzato
-        • **CRO** per conversioni migliori
+        • **Temi principali** delle recensioni
+        • **Percentuali** di menzione
+        • **Esempi reali** per ogni insight
+        • **Strategie** basate sui dati
         """)
         
         st.markdown("""
         <div class="warning-box">
             <h4>⚡ Prestazioni</h4>
-            <p>L'analisi richiede 2-5 minuti per 10 pagine di recensioni</p>
+            <p>L'analisi richiede 3-7 minuti per 10 pagine con clustering</p>
         </div>
         """, unsafe_allow_html=True)
 
- # Footer
+    # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666;'>
-        <p>Trustpilot Analyzer PRO - Crea strategie partendo dalle analisi di TrustPilot - Sviluppato da Daniele Pisciottano e il suo amico Claude 🦕</p>
+        <p>Trustpilot Analyzer PRO v2.0 - Analisi avanzata con clustering e frequenze - Sviluppato da Daniele Pisciottano e il suo amico Claude 🦕</p>
     </div>
     """, unsafe_allow_html=True)
 
