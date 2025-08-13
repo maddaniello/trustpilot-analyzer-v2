@@ -167,50 +167,74 @@ def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_te
 
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Trova tutte le recensioni
-            recensioni_elementi = soup.find_all('article', {'data-service-review-business-unit-id': True})
+            # Trova tutti i contenitori di recensioni
+            recensioni_contenitori = soup.find_all('div', class_=re.compile(r'styles_reviewCardInner|review-card|paper.*cardPadding'))
             
-            if not recensioni_elementi:
-                # Fallback su altri selettori
-                recensioni_elementi = soup.select('section[class*="reviewContentwrapper"]')
+            if not recensioni_contenitori:
+                recensioni_contenitori = soup.find_all('article')
             
-            for elemento in recensioni_elementi:
+            for contenitore in recensioni_contenitori:
                 try:
-                    # Estrai testo
-                    testo = elemento.get_text(separator=" ", strip=True)
-                    
-                    # Estrai rating (stelle)
+                    # Estrai rating con metodi multipli
                     rating = 0
-                    # Cerca il rating in vari modi
-                    rating_elem = elemento.find('div', {'data-rating': True})
-                    if rating_elem:
-                        rating = int(rating_elem.get('data-rating', 0))
+                    
+                    # Metodo 1: Cerca stelle piene nelle immagini
+                    star_images = contenitore.find_all('img', alt=re.compile(r'Rated \d'))
+                    if star_images:
+                        for img in star_images:
+                            alt_text = img.get('alt', '')
+                            match = re.search(r'Rated (\d)', alt_text)
+                            if match:
+                                rating = int(match.group(1))
+                                break
+                    
+                    # Metodo 2: Cerca attributi data-star-rating
+                    if not rating:
+                        rating_elem = contenitore.find(attrs={'data-star-rating': True})
+                        if rating_elem:
+                            rating = int(rating_elem['data-star-rating'])
+                    
+                    # Metodo 3: Conta le stelle SVG piene
+                    if not rating:
+                        # Cerca SVG stelle piene (di solito hanno path o fill specifici)
+                        stelle_piene = contenitore.find_all('svg', class_=re.compile(r'star.*filled|star.*active'))
+                        if stelle_piene:
+                            rating = len(stelle_piene)
+                    
+                    # Metodo 4: Cerca nel testo strutturato
+                    if not rating:
+                        rating_text = contenitore.find(class_=re.compile(r'star-rating|rating-stars|styles_reviewHeader'))
+                        if rating_text:
+                            text = rating_text.get_text()
+                            match = re.search(r'(\d)\s*su\s*5|(\d)\s*star|(\d)\s*stelle', text)
+                            if match:
+                                rating = int(match.group(1) or match.group(2) or match.group(3))
+                    
+                    # Estrai testo della recensione
+                    # Cerca specificamente il contenuto della recensione
+                    testo_elem = contenitore.find(class_=re.compile(r'reviewContent|typography.*body|styles_reviewContent'))
+                    if not testo_elem:
+                        testo_elem = contenitore.find('p')
+                    
+                    if testo_elem:
+                        testo = testo_elem.get_text(strip=True)
                     else:
-                        # Cerca stelle nel testo o nelle classi
-                        star_elements = elemento.find_all('img', alt=lambda x: x and 'star' in x.lower())
-                        if star_elements:
-                            rating = len([s for s in star_elements if 'filled' in str(s) or 'full' in str(s)])
+                        testo = contenitore.get_text(separator=" ", strip=True)
+                    
+                    # Pulisci il testo da elementi non necessari
+                    testo = re.sub(r'Verificata|Data dell.*esperienza.*\d{4}', '', testo).strip()
+                    
+                    # Costruisci URL
+                    review_url = url_pagina
+                    link_elem = contenitore.find('a', href=re.compile(r'/reviews/'))
+                    if link_elem:
+                        href = link_elem['href']
+                        if href.startswith('/'):
+                            review_url = f"https://it.trustpilot.com{href}"
                         else:
-                            # Cerca nel testo
-                            stelle_match = re.search(r'(\d)\s*stelle?', testo.lower())
-                            if stelle_match:
-                                rating = int(stelle_match.group(1))
+                            review_url = href
                     
-                    # Prova a costruire URL diretto (pattern comune Trustpilot)
-                    review_id = elemento.get('id', '')
-                    if not review_id:
-                        # Cerca ID in altri attributi
-                        link_elem = elemento.find('a', href=True)
-                        if link_elem and 'reviews' in link_elem['href']:
-                            review_id = link_elem['href'].split('/')[-1]
-                    
-                    # Costruisci URL della recensione
-                    if review_id:
-                        review_url = f"{url_base}/reviews/{review_id}"
-                    else:
-                        review_url = url_pagina  # Fallback alla pagina
-                    
-                    if testo and len(testo) > 50:
+                    if testo and len(testo) > 30 and rating > 0:
                         tutte_recensioni.append({
                             'testo': testo,
                             'testo_pulito': pulisci_testo(testo),
@@ -265,114 +289,148 @@ def clusterizza_recensioni(recensioni_data, n_clusters=5):
     
     return recensioni_data, cluster_keywords
 
-def analizza_sentiment_base(testo):
-    """Analisi sentiment basilare basata su parole chiave"""
-    testo_lower = testo.lower()
-    
-    # Parole positive
-    parole_positive = [
-        'ottimo', 'eccellente', 'fantastico', 'perfetto', 'consiglio', 'soddisfatto',
-        'felice', 'contento', 'veloce', 'professionale', 'gentile', 'cortese',
-        'efficiente', 'affidabile', 'super', 'migliore', 'top', 'bravo', 'bello',
-        'puntuale', 'preciso', 'competente', 'disponibile', 'serio', 'onesto',
-        'consigliatissimo', 'impeccabile', 'eccezionale', 'straordinario'
-    ]
-    
-    # Parole negative
-    parole_negative = [
-        'pessimo', 'terribile', 'delusione', 'deluso', 'sconsiglio', 'problema',
-        'lento', 'scortese', 'maleducato', 'incompetente', 'male', 'peggiore',
-        'orribile', 'insoddisfatto', 'truffa', 'furto', 'evitate', 'disastro',
-        'vergogna', 'ridicolo', 'assurdo', 'impossibile', 'incapace', 'mai più',
-        'scandaloso', 'inaccettabile', 'deludente', 'scarso', 'scadente'
-    ]
-    
-    # Conta occorrenze
-    score_positivo = sum(1 for parola in parole_positive if parola in testo_lower)
-    score_negativo = sum(1 for parola in parole_negative if parola in testo_lower)
-    
-    # Calcola sentiment
-    if score_positivo > score_negativo:
-        return 'positivo'
-    elif score_negativo > score_positivo:
-        return 'negativo'
-    else:
-        return 'neutro'
-
-def analizza_frequenze_temi(risultati, recensioni_data):
-    """Calcola le frequenze dei temi e trova esempi con controllo sentiment"""
+def analizza_frequenze_temi_migliorata(risultati, recensioni_data, client):
+    """Calcola le frequenze usando l'AI per matching accurato"""
     analisi_frequenze = {
         'punti_forza': {},
         'punti_debolezza': {}
     }
     
-    # Analizza punti di forza
-    for punto in risultati['punti_forza']:
-        count = 0
-        esempi = []
-        
-        # Cerca menzioni nelle recensioni
-        for rec in recensioni_data:
-            testo_lower = rec['testo'].lower()
-            # Cerca parole chiave del punto
-            parole_punto = punto.lower().split()
-            
-            # Verifica se il punto è menzionato
-            if any(parola in testo_lower for parola in parole_punto if len(parola) > 3):
-                # Per i punti di forza, considera solo recensioni positive (4-5 stelle)
-                # e sentiment positivo
-                sentiment = analizza_sentiment_base(rec['testo'])
-                rating = rec.get('rating', 0)
-                
-                if (rating >= 4 or rating == 0) and sentiment != 'negativo':
-                    count += 1
-                    if len(esempi) < 2:  # Massimo 2 esempi
-                        esempi.append({
-                            'testo': rec['testo'][:200] + '...' if len(rec['testo']) > 200 else rec['testo'],
-                            'url': rec['url'],
-                            'rating': rating
-                        })
-        
-        if count > 0:
-            percentuale = (count / len(recensioni_data)) * 100
-            analisi_frequenze['punti_forza'][punto] = {
-                'count': count,
-                'percentuale': percentuale,
-                'esempi': esempi
-            }
+    # Prepara recensioni per rating
+    recensioni_positive = [r for r in recensioni_data if r['rating'] >= 4]
+    recensioni_negative = [r for r in recensioni_data if r['rating'] <= 2]
+    recensioni_medie = [r for r in recensioni_data if r['rating'] == 3]
     
-    # Analizza punti di debolezza
-    for punto in risultati['punti_debolezza']:
-        count = 0
-        esempi = []
-        
-        for rec in recensioni_data:
-            testo_lower = rec['testo'].lower()
-            parole_punto = punto.lower().split()
+    # Analizza punti di forza con AI
+    if risultati['punti_forza'] and recensioni_positive:
+        # Crea batch di recensioni positive
+        batch_size = 10
+        for punto in risultati['punti_forza'][:15]:  # Limita a 15 punti principali
+            esempi_trovati = []
+            count = 0
             
-            # Verifica se il punto è menzionato
-            if any(parola in testo_lower for parola in parole_punto if len(parola) > 3):
-                # Per i punti di debolezza, considera solo recensioni negative (1-3 stelle)
-                # o sentiment negativo
-                sentiment = analizza_sentiment_base(rec['testo'])
-                rating = rec.get('rating', 0)
+            # Analizza in batch per efficienza
+            for i in range(0, min(len(recensioni_positive), 30), batch_size):
+                batch = recensioni_positive[i:i+batch_size]
+                recensioni_batch = "\n\n".join([f"[{j+1}] {r['testo'][:300]}" for j, r in enumerate(batch)])
                 
-                if rating <= 3 or sentiment == 'negativo':
-                    count += 1
-                    if len(esempi) < 2:
-                        esempi.append({
-                            'testo': rec['testo'][:200] + '...' if len(rec['testo']) > 200 else rec['testo'],
-                            'url': rec['url'],
-                            'rating': rating
-                        })
-        
-        if count > 0:
-            percentuale = (count / len(recensioni_data)) * 100
-            analisi_frequenze['punti_debolezza'][punto] = {
-                'count': count,
-                'percentuale': percentuale,
-                'esempi': esempi
-            }
+                prompt = f"""
+                Analizza se le seguenti recensioni POSITIVE menzionano questo punto di forza:
+                "{punto}"
+                
+                RECENSIONI:
+                {recensioni_batch}
+                
+                Rispondi SOLO con un JSON nel formato:
+                {{
+                    "recensioni_rilevanti": [1, 3, 5]  // numeri delle recensioni che menzionano VERAMENTE questo punto
+                }}
+                
+                Includi SOLO recensioni che effettivamente parlano di questo aspetto positivo.
+                """
+                
+                try:
+                    response = client.chat.completions.create(
+                        model="gpt-3.5-turbo",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.3,
+                        max_tokens=200
+                    )
+                    
+                    content = response.choices[0].message.content
+                    content_cleaned = re.sub(r"```json\n?|```", "", content).strip()
+                    risultato = json.loads(content_cleaned)
+                    
+                    for idx in risultato.get('recensioni_rilevanti', []):
+                        if 0 < idx <= len(batch):
+                            rec = batch[idx-1]
+                            count += 1
+                            if len(esempi_trovati) < 2:
+                                esempi_trovati.append({
+                                    'testo': rec['testo'][:200] + '...' if len(rec['testo']) > 200 else rec['testo'],
+                                    'url': rec['url'],
+                                    'rating': rec['rating']
+                                })
+                
+                except Exception:
+                    continue
+                
+                if len(esempi_trovati) >= 2:
+                    break
+            
+            if count > 0:
+                percentuale = (count / len(recensioni_data)) * 100
+                analisi_frequenze['punti_forza'][punto] = {
+                    'count': count,
+                    'percentuale': percentuale,
+                    'esempi': esempi_trovati
+                }
+    
+    # Analizza punti di debolezza con AI
+    if risultati['punti_debolezza'] and recensioni_negative:
+        batch_size = 10
+        for punto in risultati['punti_debolezza'][:15]:
+            esempi_trovati = []
+            count = 0
+            
+            # Combina recensioni negative e medie
+            recensioni_da_analizzare = recensioni_negative + recensioni_medie[:5]
+            
+            for i in range(0, min(len(recensioni_da_analizzare), 30), batch_size):
+                batch = recensioni_da_analizzare[i:i+batch_size]
+                recensioni_batch = "\n\n".join([f"[{j+1}] {r['testo'][:300]}" for j, r in enumerate(batch)])
+                
+                prompt = f"""
+                Analizza se le seguenti recensioni NEGATIVE/CRITICHE menzionano questo problema:
+                "{punto}"
+                
+                RECENSIONI:
+                {recensioni_batch}
+                
+                Rispondi SOLO con un JSON nel formato:
+                {{
+                    "recensioni_rilevanti": [1, 3, 5]  // numeri delle recensioni che menzionano VERAMENTE questo problema
+                }}
+                
+                Includi SOLO recensioni che effettivamente criticano questo aspetto.
+                """
+                
+                try:
+                    response = client.chat.completions.create(
+                        model="gpt-3.5-turbo",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.3,
+                        max_tokens=200
+                    )
+                    
+                    content = response.choices[0].message.content
+                    content_cleaned = re.sub(r"```json\n?|```", "", content).strip()
+                    risultato = json.loads(content_cleaned)
+                    
+                    for idx in risultato.get('recensioni_rilevanti', []):
+                        if 0 < idx <= len(batch):
+                            rec = batch[idx-1]
+                            count += 1
+                            if len(esempi_trovati) < 2:
+                                esempi_trovati.append({
+                                    'testo': rec['testo'][:200] + '...' if len(rec['testo']) > 200 else rec['testo'],
+                                    'url': rec['url'],
+                                    'rating': rec['rating']
+                                })
+                
+                except Exception:
+                    continue
+                
+                if len(esempi_trovati) >= 2:
+                    break
+            
+            if count > 0:
+                percentuale = (count / len(recensioni_data)) * 100
+                analisi_frequenze['punti_debolezza'][punto] = {
+                    'count': count,
+                    'percentuale': percentuale,
+                    'esempi': esempi_trovati
+                }
     
     # Ordina per frequenza
     analisi_frequenze['punti_forza'] = dict(sorted(
@@ -646,7 +704,13 @@ def main():
                     st.error("❌ Nessuna recensione estratta. Verifica l'URL.")
                     return
                 
-                st.success(f"✅ Estratte {len(recensioni_data)} recensioni!")
+                # Mostra statistiche rating
+                st.markdown("### 📊 Distribuzione Rating")
+                rating_counts = Counter(r['rating'] for r in recensioni_data)
+                rating_cols = st.columns(5)
+                for i, col in enumerate(rating_cols, 1):
+                    count = rating_counts.get(i, 0)
+                    col.metric(f"{i}⭐", count)
                 
                 # FASE 2: Clustering
                 st.markdown("### 🎯 Fase 2: Clustering Tematico")
@@ -683,8 +747,8 @@ def main():
                 
                 # FASE 5: Analisi Frequenze
                 st.markdown("### 📈 Fase 5: Analisi Frequenze e Esempi")
-                with st.spinner("Calcolo frequenze..."):
-                    analisi_frequenze = analizza_frequenze_temi(risultati, recensioni_data)
+                with st.spinner("Calcolo frequenze con AI..."):
+                    analisi_frequenze = analizza_frequenze_temi_migliorata(risultati, recensioni_data, client)
                 
                 st.markdown('<div class="success-box"><h3>🎉 Analisi Completata!</h3></div>', unsafe_allow_html=True)
                 
