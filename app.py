@@ -138,17 +138,34 @@ def get_stopwords():
         "hai", "ha", "hanno", "essere", "avere", "fare", "dire", "andare", "del", "della",
         "dei", "delle", "dal", "dalla", "dai", "dalle", "nel", "nella", "nei", "nelle",
         "sul", "sulla", "sui", "sulle", "al", "alla", "ai", "alle", "ho", "ottimo",
-        "buono", "buona", "bene", "male", "servizio", "prodotto", "azienda", "sempre"
+        "buono", "buona", "bene", "male", "servizio", "prodotto", "azienda", "sempre",
+        # Aggiunti termini da escludere
+        "verificata", "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+        "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
+        "lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"
     ])
 
 def pulisci_testo(testo):
     """Pulizia avanzata del testo"""
     stopwords_italiane = get_stopwords()
     testo = testo.lower()
+    
+    # Rimozione più aggressiva di date e termini temporali
     testo = re.sub(r'pubblicata il \d{1,2} \w+ \d{4}', '', testo)
+    testo = re.sub(r'data dell\'esperienza:.*', '', testo, flags=re.IGNORECASE)
+    testo = re.sub(r'\d{1,2}\s+(gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\s+\d{4}', '', testo)
+    testo = re.sub(r'(gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\s+\d{4}', '', testo)
+    
+    # Rimozione parola "verificata" e varianti
+    testo = re.sub(r'\bverificat[aoe]\b', '', testo)
+    testo = re.sub(r'\bverifica\b', '', testo)
+    
+    # Rimozione stelle e rating
     testo = re.sub(r'stelle su 5', '', testo)
     testo = re.sub(r'\d+ stelle', '', testo)
-    testo = re.sub(r'data dell\'esperienza:.*', '', testo)
+    testo = re.sub(r'valutato \d', '', testo)
+    
+    # Pulizia generale
     testo = re.sub(r'[^\w\s]', ' ', testo)
     testo = re.sub(r'\d+', '', testo)
     testo = re.sub(r'\s+', ' ', testo)
@@ -159,17 +176,14 @@ def pulisci_testo(testo):
 
 def estrai_rating_da_testo(testo):
     """Estrae il rating dalla recensione"""
-    # Cerca pattern tipo "5 stelle", "4 stelle su 5", etc.
     pattern_stelle = re.search(r'(\d)\s*stell[ae]', testo.lower())
     if pattern_stelle:
         return int(pattern_stelle.group(1))
     
-    # Cerca "Valutato" seguito da numero
     pattern_valutato = re.search(r'valutato\s*(\d)', testo.lower())
     if pattern_valutato:
         return int(pattern_valutato.group(1))
     
-    # Default se non trova nulla
     return None
 
 def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_text):
@@ -178,6 +192,10 @@ def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_te
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
+    
+    # Estrai il dominio dall'URL
+    domain_match = re.search(r'/review/([^/?]+)', url_base)
+    domain = domain_match.group(1) if domain_match else ""
 
     for pagina in range(1, max_pagine + 1):
         url_pagina = f"{url_base}?page={pagina}"
@@ -194,7 +212,6 @@ def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_te
             recensioni_containers = soup.find_all('article', {'data-service-review-rating': True})
             
             if not recensioni_containers:
-                # Fallback su altri selettori
                 recensioni_containers = soup.select('section[class*="reviewContentwrapper"], div[class*="review-content"], article[class*="review"]')
             
             if not recensioni_containers and pagina == 1:
@@ -214,26 +231,39 @@ def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_te
                     if rating_elem:
                         rating = int(rating_elem)
                     else:
-                        # Cerca in altri modi
                         rating_div = container.find('div', {'data-service-review-rating': True})
                         if rating_div:
                             rating = int(rating_div.get('data-service-review-rating'))
                         else:
-                            # Estrai dal testo
                             rating = estrai_rating_da_testo(testo)
                     
-                    # Estrai ID recensione per costruire il link
+                    # Estrai ID recensione per costruire il link corretto
                     review_id = None
-                    review_id_elem = container.get('data-service-review-id')
-                    if review_id_elem:
-                        review_id = review_id_elem
+                    review_link_elem = container.find('a', {'data-review-url': True})
+                    if review_link_elem:
+                        review_id = review_link_elem.get('data-review-url')
+                    else:
+                        # Cerca nell'attributo data-service-review-id
+                        review_id_elem = container.get('data-service-review-id')
+                        if review_id_elem:
+                            review_id = review_id_elem
+                        else:
+                            # Cerca un link "Leggi di più" o simile
+                            link_elem = container.find('a', href=True)
+                            if link_elem and '/review/' in link_elem['href']:
+                                review_id = link_elem['href'].split('/')[-1]
                     
-                    # Costruisci link (approssimativo)
-                    link = f"{url_base}?review={review_id}" if review_id else url_pagina
+                    # Costruisci link diretto alla recensione
+                    if review_id and domain:
+                        # Il formato corretto per il link diretto è: https://it.trustpilot.com/reviews/{review_id}
+                        link = f"https://it.trustpilot.com/reviews/{review_id}"
+                    else:
+                        # Fallback: usa il link della pagina con anchor se possibile
+                        link = f"{url_pagina}#review-{review_id}" if review_id else url_pagina
                     
                     # Estrai data se disponibile
                     data = None
-                    data_match = re.search(r'(\d{1,2}\s+\w+\s+\d{4})', testo)
+                    data_match = re.search(r'(\d{1,2}\s+(?:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\s+\d{4})', testo)
                     if data_match:
                         data = data_match.group(1)
                     
@@ -243,7 +273,8 @@ def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_te
                         'rating': rating,
                         'link': link,
                         'data': data,
-                        'pagina': pagina
+                        'pagina': pagina,
+                        'review_id': review_id  # Salviamo anche l'ID per uso futuro
                     }
                     
                     tutte_recensioni.append(recensione_data)
@@ -268,8 +299,15 @@ def clusterizza_recensioni(recensioni_data, n_clusters=None):
     # Prepara i testi per il clustering
     testi = [r['testo_pulito'] for r in recensioni_data]
     
-    # Vectorizza i testi
-    vectorizer = TfidfVectorizer(max_features=100, min_df=2, max_df=0.8)
+    # Vectorizza i testi escludendo termini temporali
+    vectorizer = TfidfVectorizer(
+        max_features=100, 
+        min_df=2, 
+        max_df=0.8,
+        # Aggiungi token_pattern per escludere numeri e date
+        token_pattern=r'\b[a-zA-Z]{3,}\b'
+    )
+    
     try:
         X = vectorizer.fit_transform(testi)
     except:
@@ -290,6 +328,7 @@ def clusterizza_recensioni(recensioni_data, n_clusters=None):
     # Estrai tematiche principali per ogni cluster
     feature_names = vectorizer.get_feature_names_out()
     cluster_topics = []
+    recensioni_usate = set()  # Track delle recensioni già usate come esempio
     
     for i in range(n_clusters):
         # Trova le parole più rappresentative del cluster
@@ -297,8 +336,21 @@ def clusterizza_recensioni(recensioni_data, n_clusters=None):
         top_indices = cluster_center.argsort()[-10:][::-1]
         top_words = [feature_names[idx] for idx in top_indices]
         
+        # Filtra ulteriormente le parole per escludere termini non significativi
+        top_words = [w for w in top_words if len(w) > 3 and not w.isdigit()]
+        
         # Conta recensioni nel cluster
         cluster_reviews = [r for r in recensioni_data if r['cluster'] == i]
+        
+        # Seleziona recensioni esempio uniche per questo cluster
+        esempi_cluster = []
+        for rec in cluster_reviews:
+            rec_id = rec.get('review_id', rec['testo'][:50])  # Usa ID o inizio testo come identificatore
+            if rec_id not in recensioni_usate:
+                esempi_cluster.append(rec)
+                recensioni_usate.add(rec_id)
+                if len(esempi_cluster) >= 3:  # Massimo 3 esempi per cluster
+                    break
         
         cluster_info = {
             'id': i,
@@ -306,7 +358,7 @@ def clusterizza_recensioni(recensioni_data, n_clusters=None):
             'n_recensioni': len(cluster_reviews),
             'percentuale': (len(cluster_reviews) / len(recensioni_data)) * 100,
             'rating_medio': np.mean([r['rating'] for r in cluster_reviews if r['rating']]),
-            'recensioni': cluster_reviews
+            'recensioni': esempi_cluster  # Usa solo esempi unici
         }
         cluster_topics.append(cluster_info)
     
@@ -322,22 +374,42 @@ def analizza_frequenza_temi(risultati, recensioni_data):
         'punti_debolezza': {}
     }
     
+    recensioni_usate_forza = {}  # Track recensioni usate per punto di forza
+    recensioni_usate_debolezza = {}  # Track recensioni usate per punto di debolezza
+    
     # Calcola frequenze per punti di forza
     for punto in risultati['punti_forza']:
         count = 0
         esempi = []
+        recensioni_ids_usate = set()
+        
+        # Estrai parole chiave significative dal punto (escludendo articoli e preposizioni)
+        parole_punto = [p for p in punto.lower().split() if len(p) > 3][:3]
+        
         for rec in recensioni_data:
             if rec['rating'] and rec['rating'] >= 4:  # Solo recensioni positive
-                # Cerca menzioni del punto nel testo
-                if any(word in rec['testo'].lower() for word in punto.lower().split()[:3]):
-                    count += 1
-                    if len(esempi) < 2:
-                        esempi.append(rec)
+                rec_id = rec.get('review_id', rec['testo'][:50])
+                
+                # Verifica che la recensione non sia già stata usata per questo punto
+                if rec_id not in recensioni_ids_usate:
+                    # Cerca menzioni più precise del punto nel testo pulito
+                    testo_lower = rec['testo_pulito'].lower()
+                    
+                    # Verifica presenza di almeno 2 parole chiave del punto
+                    matches = sum(1 for parola in parole_punto if parola in testo_lower)
+                    
+                    if matches >= min(2, len(parole_punto)):
+                        count += 1
+                        recensioni_ids_usate.add(rec_id)
+                        
+                        # Aggiungi esempio solo se effettivamente contiene il tema
+                        if len(esempi) < 2 and any(parola in testo_lower for parola in parole_punto):
+                            esempi.append(rec)
         
         if count > 0:
             frequenze['punti_forza'][punto] = {
                 'count': count,
-                'percentuale': (count / len(recensioni_data)) * 100,
+                'percentuale': (count / len([r for r in recensioni_data if r['rating'] and r['rating'] >= 4])) * 100 if any(r['rating'] and r['rating'] >= 4 for r in recensioni_data) else 0,
                 'esempi': esempi
             }
     
@@ -345,18 +417,35 @@ def analizza_frequenza_temi(risultati, recensioni_data):
     for punto in risultati['punti_debolezza']:
         count = 0
         esempi = []
+        recensioni_ids_usate = set()
+        
+        # Estrai parole chiave significative dal punto
+        parole_punto = [p for p in punto.lower().split() if len(p) > 3][:3]
+        
         for rec in recensioni_data:
             if rec['rating'] and rec['rating'] <= 2:  # Solo recensioni negative
-                # Cerca menzioni del punto nel testo
-                if any(word in rec['testo'].lower() for word in punto.lower().split()[:3]):
-                    count += 1
-                    if len(esempi) < 2:
-                        esempi.append(rec)
+                rec_id = rec.get('review_id', rec['testo'][:50])
+                
+                # Verifica che la recensione non sia già stata usata per questo punto
+                if rec_id not in recensioni_ids_usate:
+                    # Cerca menzioni più precise del punto nel testo pulito
+                    testo_lower = rec['testo_pulito'].lower()
+                    
+                    # Verifica presenza di almeno 2 parole chiave del punto
+                    matches = sum(1 for parola in parole_punto if parola in testo_lower)
+                    
+                    if matches >= min(2, len(parole_punto)):
+                        count += 1
+                        recensioni_ids_usate.add(rec_id)
+                        
+                        # Aggiungi esempio solo se effettivamente contiene il tema
+                        if len(esempi) < 2 and any(parola in testo_lower for parola in parole_punto):
+                            esempi.append(rec)
         
         if count > 0:
             frequenze['punti_debolezza'][punto] = {
                 'count': count,
-                'percentuale': (count / len(recensioni_data)) * 100,
+                'percentuale': (count / len([r for r in recensioni_data if r['rating'] and r['rating'] <= 2])) * 100 if any(r['rating'] and r['rating'] <= 2 for r in recensioni_data) else 0,
                 'esempi': esempi
             }
     
@@ -418,6 +507,8 @@ def analizza_blocchi_avanzata_con_sentiment(blocchi, client, progress_bar, statu
         - Email: automazioni basate sui comportamenti descritti
         - CRO: ottimizzazioni basate sui problemi UX menzionati
         - Sinergie: come combinare i canali per risolvere le criticità
+        - IGNORA completamente date, mesi, giorni e la parola "verificata"
+        - Non includere MAI termini temporali nelle parole chiave
 
         Fornisci suggerimenti PRATICI, SPECIFICI e IMPLEMENTABILI.
         """
@@ -463,6 +554,14 @@ def analizza_blocchi_avanzata_con_sentiment(blocchi, client, progress_bar, statu
         if chiave != 'sentiment_distribution':
             risultati[chiave] = list(dict.fromkeys(risultati[chiave]))
     
+    # Filtra ulteriormente parole chiave per rimuovere termini temporali
+    termini_da_escludere = ['verificata', 'gennaio', 'febbraio', 'marzo', 'aprile', 'maggio', 
+                           'giugno', 'luglio', 'agosto', 'settembre', 'ottobre', 'novembre', 'dicembre']
+    risultati['parole_chiave'] = [
+        parola for parola in risultati['parole_chiave'] 
+        if parola.lower() not in termini_da_escludere and not any(t in parola.lower() for t in termini_da_escludere)
+    ]
+    
     return risultati
 
 def mostra_esempi_recensioni(tema, esempi, tipo="positivo"):
@@ -472,28 +571,36 @@ def mostra_esempi_recensioni(tema, esempi, tipo="positivo"):
     
     st.markdown(f"**Esempi di recensioni:**")
     
+    esempi_mostrati = set()  # Track degli esempi già mostrati
+    
     for esempio in esempi[:2]:  # Mostra max 2 esempi
-        rating_stars = "⭐" * (esempio['rating'] if esempio['rating'] else 3)
+        # Crea un identificatore unico per evitare duplicati
+        esempio_id = esempio.get('review_id', esempio['testo'][:50])
         
-        # Estratto della recensione (primi 200 caratteri)
-        testo_breve = esempio['testo'][:200] + "..." if len(esempio['testo']) > 200 else esempio['testo']
-        
-        css_class = "positive-review" if tipo == "positivo" else "negative-review"
-        
-        st.markdown(f"""
-        <div class="review-example {css_class}">
-            <div style="margin-bottom: 0.5rem;">
-                <strong>{rating_stars}</strong>
-                {f'<small style="color: #666;"> - {esempio["data"]}</small>' if esempio['data'] else ''}
+        if esempio_id not in esempi_mostrati:
+            esempi_mostrati.add(esempio_id)
+            
+            rating_stars = "⭐" * (esempio['rating'] if esempio['rating'] else 3)
+            
+            # Estratto della recensione (primi 200 caratteri)
+            testo_breve = esempio['testo'][:200] + "..." if len(esempio['testo']) > 200 else esempio['testo']
+            
+            css_class = "positive-review" if tipo == "positivo" else "negative-review"
+            
+            st.markdown(f"""
+            <div class="review-example {css_class}">
+                <div style="margin-bottom: 0.5rem;">
+                    <strong>{rating_stars}</strong>
+                    {f'<small style="color: #666;"> - {esempio["data"]}</small>' if esempio['data'] else ''}
+                </div>
+                <div style="margin-bottom: 0.5rem; color: #333;">
+                    {testo_breve}
+                </div>
+                <a href="{esempio['link']}" target="_blank" style="color: #007bff; text-decoration: none;">
+                    🔗 Vedi recensione completa su Trustpilot →
+                </a>
             </div>
-            <div style="margin-bottom: 0.5rem; color: #333;">
-                {testo_breve}
-            </div>
-            <a href="{esempio['link']}" target="_blank" style="color: #007bff; text-decoration: none;">
-                🔗 Vedi recensione completa su Trustpilot →
-            </a>
-        </div>
-        """, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
 
 def crea_excel_download_avanzato(recensioni_data, risultati, clusters, frequenze):
     """Crea file Excel avanzato per download"""
@@ -786,6 +893,8 @@ def main():
                 with tab3:
                     st.markdown("### 🎨 Analisi Cluster Tematici")
                     
+                    esempi_mostrati_globali = set()  # Track globale degli esempi mostrati
+                    
                     for cluster in clusters:
                         with st.expander(f"Cluster {cluster['id'] + 1}: {', '.join(cluster['parole_chiave'][:3])} ({cluster['percentuale']:.1f}%)"):
                             col_c1, col_c2 = st.columns(2)
@@ -799,12 +908,18 @@ def main():
                                 for parola in cluster['parole_chiave']:
                                     st.markdown(f"• {parola}")
                             
-                            # Mostra alcune recensioni esempio del cluster
+                            # Mostra alcune recensioni esempio del cluster (uniche)
                             st.markdown("**Recensioni esempio di questo cluster:**")
-                            for rec in cluster['recensioni'][:2]:
-                                rating_stars = "⭐" * (rec['rating'] if rec['rating'] else 3)
-                                testo_breve = rec['testo'][:150] + "..." if len(rec['testo']) > 150 else rec['testo']
-                                st.markdown(f"> {rating_stars} {testo_breve}")
+                            esempi_mostrati = 0
+                            for rec in cluster['recensioni']:
+                                rec_id = rec.get('review_id', rec['testo'][:50])
+                                if rec_id not in esempi_mostrati_globali and esempi_mostrati < 2:
+                                    esempi_mostrati_globali.add(rec_id)
+                                    esempi_mostrati += 1
+                                    rating_stars = "⭐" * (rec['rating'] if rec['rating'] else 3)
+                                    testo_breve = rec['testo'][:150] + "..." if len(rec['testo']) > 150 else rec['testo']
+                                    st.markdown(f"> {rating_stars} {testo_breve}")
+                                    st.markdown(f"[🔗 Vedi recensione completa]({rec['link']})")
                 
                 with tab4:
                     st.markdown("### 🎯 Leve Marketing Strategiche")
@@ -932,7 +1047,7 @@ def main():
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666;'>
-        <p>Trustpilot Analyzer PRO v2.0 - Analisi Avanzata con Clustering e Sentiment Analysis</p>
+        <p>Trustpilot Analyzer PRO v2.1 - Analisi Avanzata con Clustering e Sentiment Analysis</p>
         <p>Sviluppato da Daniele Pisciottano e Claude 🦕</p>
     </div>
     """, unsafe_allow_html=True)
