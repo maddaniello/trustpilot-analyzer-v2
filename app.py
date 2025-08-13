@@ -237,29 +237,52 @@ def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_te
                         else:
                             rating = estrai_rating_da_testo(testo)
                     
-                    # Estrai ID recensione per costruire il link corretto
+                    # Estrai ID recensione - proviamo diversi metodi
                     review_id = None
-                    review_link_elem = container.find('a', {'data-review-url': True})
-                    if review_link_elem:
-                        review_id = review_link_elem.get('data-review-url')
-                    else:
-                        # Cerca nell'attributo data-service-review-id
-                        review_id_elem = container.get('data-service-review-id')
-                        if review_id_elem:
-                            review_id = review_id_elem
-                        else:
-                            # Cerca un link "Leggi di più" o simile
-                            link_elem = container.find('a', href=True)
-                            if link_elem and '/review/' in link_elem['href']:
-                                review_id = link_elem['href'].split('/')[-1]
+                    link = url_pagina  # Default fallback
                     
-                    # Costruisci link diretto alla recensione
+                    # Metodo 1: Cerca link con classe specifica che contiene l'ID recensione
+                    review_link = container.find('a', {'data-review-url': True})
+                    if review_link:
+                        review_url = review_link.get('data-review-url')
+                        if review_url:
+                            review_id = review_url.split('/')[-1] if '/' in review_url else review_url
+                    
+                    # Metodo 2: Cerca nell'attributo data-service-review-id
+                    if not review_id:
+                        review_id = container.get('data-service-review-id')
+                    
+                    # Metodo 3: Cerca link "Date of experience" o simili che spesso contengono l'ID
+                    if not review_id:
+                        time_elem = container.find('time', {'datetime': True})
+                        if time_elem:
+                            parent_link = time_elem.find_parent('a', href=True)
+                            if parent_link and '/reviews/' in parent_link['href']:
+                                review_id = parent_link['href'].split('/reviews/')[-1].split('?')[0]
+                    
+                    # Metodo 4: Cerca qualsiasi link che contenga /reviews/
+                    if not review_id:
+                        all_links = container.find_all('a', href=True)
+                        for link_elem in all_links:
+                            href = link_elem['href']
+                            if '/reviews/' in href:
+                                # Estrai l'ID dalla URL
+                                review_id = href.split('/reviews/')[-1].split('?')[0].split('#')[0]
+                                break
+                    
+                    # Metodo 5: Cerca nel data-consumer-review-id
+                    if not review_id:
+                        review_id = container.get('data-consumer-review-id')
+                    
+                    # Costruisci il link corretto
                     if review_id and domain:
-                        # Il formato corretto per il link diretto è: https://it.trustpilot.com/reviews/{review_id}
-                        link = f"https://it.trustpilot.com/reviews/{review_id}"
-                    else:
-                        # Fallback: usa il link della pagina con anchor se possibile
-                        link = f"{url_pagina}#review-{review_id}" if review_id else url_pagina
+                        # Formato standard Trustpilot per link diretti alle recensioni
+                        link = f"https://it.trustpilot.com/review/{domain}?reviews={review_id}"
+                        # Alternativa se il primo non funziona
+                        # link = f"https://it.trustpilot.com/reviews/{review_id}"
+                    elif review_id:
+                        # Se abbiamo solo l'ID ma non il dominio
+                        link = f"{url_base}?reviews={review_id}"
                     
                     # Estrai data se disponibile
                     data = None
