@@ -275,14 +275,12 @@ def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_te
                         review_id = container.get('data-consumer-review-id')
                     
                     # Costruisci il link corretto
-                    if review_id and domain:
-                        # Formato standard Trustpilot per link diretti alle recensioni
-                        link = f"https://it.trustpilot.com/review/{domain}?reviews={review_id}"
-                        # Alternativa se il primo non funziona
-                        # link = f"https://it.trustpilot.com/reviews/{review_id}"
-                    elif review_id:
-                        # Se abbiamo solo l'ID ma non il dominio
-                        link = f"{url_base}?reviews={review_id}"
+                    if review_id:
+                        # Formato corretto per link diretto alla singola recensione
+                        link = f"https://it.trustpilot.com/reviews/{review_id}"
+                    else:
+                        # Fallback se non abbiamo l'ID
+                        link = url_pagina
                     
                     # Estrai data se disponibile
                     data = None
