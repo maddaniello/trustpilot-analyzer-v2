@@ -150,7 +150,7 @@ def pulisci_testo(testo):
     return " ".join(parole_filtrate)
 
 def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_text):
-    """Estrae recensioni con metadata (URL specifico)"""
+    """Estrae recensioni con metadata (URL specifico e rating)"""
     tutte_recensioni = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -179,6 +179,23 @@ def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_te
                     # Estrai testo
                     testo = elemento.get_text(separator=" ", strip=True)
                     
+                    # Estrai rating (stelle)
+                    rating = 0
+                    # Cerca il rating in vari modi
+                    rating_elem = elemento.find('div', {'data-rating': True})
+                    if rating_elem:
+                        rating = int(rating_elem.get('data-rating', 0))
+                    else:
+                        # Cerca stelle nel testo o nelle classi
+                        star_elements = elemento.find_all('img', alt=lambda x: x and 'star' in x.lower())
+                        if star_elements:
+                            rating = len([s for s in star_elements if 'filled' in str(s) or 'full' in str(s)])
+                        else:
+                            # Cerca nel testo
+                            stelle_match = re.search(r'(\d)\s*stelle?', testo.lower())
+                            if stelle_match:
+                                rating = int(stelle_match.group(1))
+                    
                     # Prova a costruire URL diretto (pattern comune Trustpilot)
                     review_id = elemento.get('id', '')
                     if not review_id:
@@ -198,7 +215,8 @@ def estrai_recensioni_con_metadata(url_base, max_pagine, progress_bar, status_te
                             'testo': testo,
                             'testo_pulito': pulisci_testo(testo),
                             'url': review_url,
-                            'pagina': pagina
+                            'pagina': pagina,
+                            'rating': rating
                         })
                         
                 except Exception as e:
@@ -247,8 +265,42 @@ def clusterizza_recensioni(recensioni_data, n_clusters=5):
     
     return recensioni_data, cluster_keywords
 
+def analizza_sentiment_base(testo):
+    """Analisi sentiment basilare basata su parole chiave"""
+    testo_lower = testo.lower()
+    
+    # Parole positive
+    parole_positive = [
+        'ottimo', 'eccellente', 'fantastico', 'perfetto', 'consiglio', 'soddisfatto',
+        'felice', 'contento', 'veloce', 'professionale', 'gentile', 'cortese',
+        'efficiente', 'affidabile', 'super', 'migliore', 'top', 'bravo', 'bello',
+        'puntuale', 'preciso', 'competente', 'disponibile', 'serio', 'onesto',
+        'consigliatissimo', 'impeccabile', 'eccezionale', 'straordinario'
+    ]
+    
+    # Parole negative
+    parole_negative = [
+        'pessimo', 'terribile', 'delusione', 'deluso', 'sconsiglio', 'problema',
+        'lento', 'scortese', 'maleducato', 'incompetente', 'male', 'peggiore',
+        'orribile', 'insoddisfatto', 'truffa', 'furto', 'evitate', 'disastro',
+        'vergogna', 'ridicolo', 'assurdo', 'impossibile', 'incapace', 'mai più',
+        'scandaloso', 'inaccettabile', 'deludente', 'scarso', 'scadente'
+    ]
+    
+    # Conta occorrenze
+    score_positivo = sum(1 for parola in parole_positive if parola in testo_lower)
+    score_negativo = sum(1 for parola in parole_negative if parola in testo_lower)
+    
+    # Calcola sentiment
+    if score_positivo > score_negativo:
+        return 'positivo'
+    elif score_negativo > score_positivo:
+        return 'negativo'
+    else:
+        return 'neutro'
+
 def analizza_frequenze_temi(risultati, recensioni_data):
-    """Calcola le frequenze dei temi e trova esempi"""
+    """Calcola le frequenze dei temi e trova esempi con controllo sentiment"""
     analisi_frequenze = {
         'punti_forza': {},
         'punti_debolezza': {}
@@ -264,13 +316,22 @@ def analizza_frequenze_temi(risultati, recensioni_data):
             testo_lower = rec['testo'].lower()
             # Cerca parole chiave del punto
             parole_punto = punto.lower().split()
+            
+            # Verifica se il punto è menzionato
             if any(parola in testo_lower for parola in parole_punto if len(parola) > 3):
-                count += 1
-                if len(esempi) < 2:  # Massimo 2 esempi
-                    esempi.append({
-                        'testo': rec['testo'][:200] + '...' if len(rec['testo']) > 200 else rec['testo'],
-                        'url': rec['url']
-                    })
+                # Per i punti di forza, considera solo recensioni positive (4-5 stelle)
+                # e sentiment positivo
+                sentiment = analizza_sentiment_base(rec['testo'])
+                rating = rec.get('rating', 0)
+                
+                if (rating >= 4 or rating == 0) and sentiment != 'negativo':
+                    count += 1
+                    if len(esempi) < 2:  # Massimo 2 esempi
+                        esempi.append({
+                            'testo': rec['testo'][:200] + '...' if len(rec['testo']) > 200 else rec['testo'],
+                            'url': rec['url'],
+                            'rating': rating
+                        })
         
         if count > 0:
             percentuale = (count / len(recensioni_data)) * 100
@@ -288,13 +349,22 @@ def analizza_frequenze_temi(risultati, recensioni_data):
         for rec in recensioni_data:
             testo_lower = rec['testo'].lower()
             parole_punto = punto.lower().split()
+            
+            # Verifica se il punto è menzionato
             if any(parola in testo_lower for parola in parole_punto if len(parola) > 3):
-                count += 1
-                if len(esempi) < 2:
-                    esempi.append({
-                        'testo': rec['testo'][:200] + '...' if len(rec['testo']) > 200 else rec['testo'],
-                        'url': rec['url']
-                    })
+                # Per i punti di debolezza, considera solo recensioni negative (1-3 stelle)
+                # o sentiment negativo
+                sentiment = analizza_sentiment_base(rec['testo'])
+                rating = rec.get('rating', 0)
+                
+                if rating <= 3 or sentiment == 'negativo':
+                    count += 1
+                    if len(esempi) < 2:
+                        esempi.append({
+                            'testo': rec['testo'][:200] + '...' if len(rec['testo']) > 200 else rec['testo'],
+                            'url': rec['url'],
+                            'rating': rating
+                        })
         
         if count > 0:
             percentuale = (count / len(recensioni_data)) * 100
@@ -662,6 +732,8 @@ def main():
                         if dati['esempi']:
                             with st.expander("📋 Vedi esempi"):
                                 for esempio in dati['esempi']:
+                                    rating_stars = "⭐" * esempio.get('rating', 0) if esempio.get('rating', 0) > 0 else ""
+                                    st.markdown(f'{rating_stars}')
                                     st.markdown(f'<div class="review-example">"{esempio["testo"]}"</div>', unsafe_allow_html=True)
                                     if esempio['url'] != url_base:
                                         st.markdown(f"[🔗 Vai alla recensione]({esempio['url']})")
@@ -682,6 +754,8 @@ def main():
                         if dati['esempi']:
                             with st.expander("📋 Vedi esempi"):
                                 for esempio in dati['esempi']:
+                                    rating_stars = "⭐" * esempio.get('rating', 0) if esempio.get('rating', 0) > 0 else ""
+                                    st.markdown(f'{rating_stars}')
                                     st.markdown(f'<div class="review-example">"{esempio["testo"]}"</div>', unsafe_allow_html=True)
                                     if esempio['url'] != url_base:
                                         st.markdown(f"[🔗 Vai alla recensione]({esempio['url']})")
