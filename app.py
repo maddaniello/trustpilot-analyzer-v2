@@ -714,7 +714,7 @@ def main():
         max_pagine = st.slider(
             "📄 Numero massimo pagine",
             min_value=1,
-            max_value=50,
+            max_value=100,
             value=10,
             help="Più pagine = più recensioni ma più tempo"
         )
